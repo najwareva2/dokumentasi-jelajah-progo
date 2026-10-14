@@ -1,241 +1,763 @@
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dokumentasi Script | Jelajah-In Progo</title>
+let map;
+let allData = [];
+let markers = [];
+let activeCategory = "Semua";
+let selectedData = null;
 
-    <style>
-        * {
-            box-sizing: border-box;
+const categoryIcons = {
+    "Wisata Alam": "fa-mountain-sun",
+    "Wisata Rekreasi": "fa-person-hiking",
+    "Wisata Budaya dan Religi": "fa-landmark"
+};
+
+document.addEventListener("DOMContentLoaded", () => {
+    initMap();
+    loadData();
+    setupEvents();
+});
+
+function initMap() {
+    map = L.map("map", {
+        zoomControl: true
+    }).setView([-7.75, 110.15], 11);
+
+    L.tileLayer(
+        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        {
+            maxZoom: 19,
+            attribution: "&copy; OpenStreetMap contributors"
+        }
+    ).addTo(map);
+}
+
+async function loadData() {
+    try {
+        const csvUrl = "https://raw.githubusercontent.com/aninditapawestria/jelajah-progo/main/Data%20Wisata%20Kulon%20Progo.csv";
+
+        console.log("Mencoba mengambil CSV:", csvUrl);
+
+        const response = await fetch(csvUrl, {
+            cache: "no-store"
+        });
+
+        if (!response.ok) {
+            throw new Error(
+                `CSV tidak ditemukan. Status: ${response.status}`
+            );
         }
 
-        body {
-            margin: 0;
-            font-family: Arial, sans-serif;
-            line-height: 1.7;
-            color: #35443a;
-            background: #f7f8f4;
+        const csvText = await response.text();
+
+        console.log("CSV berhasil dibaca:");
+        console.log(csvText.substring(0, 300));
+
+        allData = parseCSV(csvText)
+            .map(normalizeDestination)
+            .filter(item =>
+                item.nama_wisata &&
+                isValidCoordinate(item.latitude, item.longitude)
+            );
+
+        console.log("Jumlah data valid:", allData.length);
+        console.log(allData);
+
+        if (!allData.length) {
+            throw new Error(
+                "CSV berhasil dibaca, tetapi tidak ada data wisata dengan nama dan koordinat yang valid. Periksa nama kolom nama_wisata, latitude, dan longitude."
+            );
         }
 
-        header {
-            background: #355e48;
-            color: white;
-            padding: 24px 8%;
+        updateStatistics();
+        renderCategoryOverview();
+        renderFilters();
+        renderTable(allData);
+        renderMarkers(allData, true);
+
+        selectDestination(allData[0]);
+
+    } catch (error) {
+        console.error(error);
+
+        document.getElementById("locationTable").innerHTML = `
+            <tr>
+                <td colspan="5">
+                    Gagal memuat data: ${escapeHtml(error.message)}
+                </td>
+            </tr>
+        `;
+    }
+}
+
+function parseCSV(text) {
+    const rows = [];
+    let row = [];
+    let value = "";
+    let insideQuotes = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        const nextChar = text[i + 1];
+
+        if (char === '"') {
+            if (insideQuotes && nextChar === '"') {
+                value += '"';
+                i++;
+            } else {
+                insideQuotes = !insideQuotes;
+            }
+
+        } else if (char === "," && !insideQuotes) {
+            row.push(value.trim());
+            value = "";
+
+        } else if (
+            (char === "\n" || char === "\r") &&
+            !insideQuotes
+        ) {
+            if (char === "\r" && nextChar === "\n") {
+                i++;
+            }
+
+            row.push(value.trim());
+            value = "";
+
+            if (row.some(cell => cell !== "")) {
+                rows.push(row);
+            }
+
+            row = [];
+
+        } else {
+            value += char;
+        }
+    }
+
+    // Menambahkan baris terakhir
+    if (value !== "" || row.length > 0) {
+        row.push(value.trim());
+
+        if (row.some(cell => cell !== "")) {
+            rows.push(row);
+        }
+    }
+
+    if (rows.length < 2) {
+        return [];
+    }
+
+    const headers = rows[0].map(header =>
+        header.replace(/^\uFEFF/, "").trim()
+    );
+
+    return rows.slice(1).map(row => {
+        const item = {};
+
+        headers.forEach((header, index) => {
+            item[header] = (row[index] ?? "").trim();
+        });
+
+        return item;
+    });
+}
+
+function normalizeDestination(item) {
+    return {
+        ...item,
+        id: String(item.id ?? "").trim(),
+        nama_wisata: String(item.nama_wisata ?? "").trim(),
+        kategori_wisata: String(item.kategori_wisata ?? "").trim(),
+        desa: String(item.desa ?? "").trim(),
+        kecamatan: String(item.kecamatan ?? "").trim(),
+        kabupaten: String(item.kabupaten ?? "Kulon Progo").trim(),
+        alamat: String(item.alamat ?? "").trim(),
+        deskripsi: String(item.deskripsi ?? "").trim(),
+        jam_operasional: String(item.jam_operasional ?? "-").trim() || "-",
+        tiket_masuk: String(item.tiket_masuk ?? "-").trim() || "-",
+        latitude: parseCoordinate(item.latitude),
+        longitude: parseCoordinate(item.longitude)
+    };
+}
+
+function parseCoordinate(value) {
+    if (typeof value === "number") {
+        return value;
+    }
+
+    const cleaned = String(value ?? "")
+        .trim()
+        .replace(",", ".");
+
+    if (!cleaned) {
+        return NaN;
+    }
+
+    return Number(cleaned);
+}
+
+function isValidCoordinate(latitude, longitude) {
+    return Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        latitude >= -90 &&
+        latitude <= 90 &&
+        longitude >= -180 &&
+        longitude <= 180;
+}
+
+function setupEvents() {
+    const search = document.getElementById("searchInput");
+    const clear = document.getElementById("clearSearch");
+    const reset = document.getElementById("resetFilter");
+    const locate = document.getElementById("locateButton");
+
+    search.addEventListener("input", applyFilters);
+
+    clear.addEventListener("click", () => {
+        search.value = "";
+        applyFilters();
+        search.focus();
+    });
+
+    reset.addEventListener("click", () => {
+        activeCategory = "Semua";
+
+        document.querySelectorAll(".filter-chip").forEach(btn => {
+            btn.classList.toggle(
+                "active",
+                btn.dataset.category === "Semua"
+            );
+        });
+
+        search.value = "";
+        applyFilters();
+    });
+
+    locate.addEventListener("click", () => {
+        if (!navigator.geolocation) {
+            alert("Browser Anda tidak mendukung geolocation.");
+            return;
         }
 
-        header a {
-            color: white;
-            text-decoration: none;
-        }
+        navigator.geolocation.getCurrentPosition(
+            position => {
+                map.setView(
+                    [
+                        position.coords.latitude,
+                        position.coords.longitude
+                    ],
+                    13
+                );
+            },
+            () => {
+                alert("Lokasi pengguna tidak dapat diakses.");
+            }
+        );
+    });
+}
 
-        main {
-            max-width: 1000px;
-            margin: 35px auto;
-            padding: 0 22px;
-        }
+function updateStatistics() {
+    const kecamatan = new Set(
+        allData.map(item => item.kecamatan.trim())
+    );
 
-        section {
-            background: white;
-            padding: 24px;
-            margin-bottom: 22px;
-            border-radius: 12px;
-            border: 1px solid #e3e8df;
-        }
+    const kategori = new Set(
+        allData
+            .map(item => normalizeCategory(item.kategori_wisata))
+            .filter(Boolean)
+    );
 
-        h1, h2, h3 {
-            color: #355e48;
-        }
+    document.getElementById("statTotal").textContent =
+        allData.length;
 
-        code {
-            background: #edf2eb;
-            padding: 3px 6px;
-            border-radius: 4px;
-        }
+    document.getElementById("statKecamatan").textContent =
+        kecamatan.size;
 
-        .file {
-            font-weight: bold;
-            color: #355e48;
-        }
+    document.getElementById("statKategori").textContent =
+        kategori.size;
 
-        .back {
-            display: inline-block;
-            margin-top: 10px;
-            color: #355e48;
-        }
+    document.getElementById("statKoordinat").textContent =
+        allData.length;
+}
 
-        footer {
-            text-align: center;
-            padding: 22px;
-            color: #68766c;
-        }
-    </style>
-</head>
+function getCategories() {
+    return [...new Set(
+        allData
+            .map(item => normalizeCategory(item.kategori_wisata))
+            .filter(Boolean)
+    )];
+}
 
-<body>
-    <header>
-        <h1 style="color:white;">Dokumentasi Script</h1>
-        <p>Jelajah-In Progo — WebGIS Pariwisata Kabupaten Kulon Progo</p>
-        <a href="index.html">← Kembali ke halaman utama</a>
-    </header>
+function renderCategoryOverview() {
+    const container = document.getElementById("categoryOverview");
+    const categories = getCategories();
 
-    <main>
-        <section>
-            <h2>1. Gambaran Umum</h2>
+    container.innerHTML = categories.map(category => {
+        const count = allData.filter(
+            item =>
+                normalizeCategory(item.kategori_wisata) === category
+        ).length;
+
+        const icon = categoryIcons[category] || "fa-location-dot";
+
+        return `
+            <div class="category-row">
+                <div class="category-icon">
+                    <i class="fa-solid ${icon}"></i>
+                </div>
+
+                <div>
+                    <strong>${escapeHtml(category)}</strong>
+                    <span>Data dari CSV</span>
+                </div>
+
+                <div class="category-count">${count}</div>
+            </div>
+        `;
+    }).join("");
+}
+
+function renderFilters() {
+    const container = document.getElementById("mapFilters");
+
+    const categories = ["Semua", ...getCategories()];
+
+    container.innerHTML = categories.map(category => `
+        <button
+            class="filter-chip ${category === "Semua" ? "active" : ""}"
+            data-category="${escapeHtml(category)}"
+        >
+            ${escapeHtml(category)}
+        </button>
+    `).join("");
+
+    container.querySelectorAll(".filter-chip").forEach(button => {
+        button.addEventListener("click", () => {
+            activeCategory = button.dataset.category;
+
+            container.querySelectorAll(".filter-chip").forEach(btn => {
+                btn.classList.toggle("active", btn === button);
+            });
+
+            applyFilters();
+        });
+    });
+}
+
+function renderTable(data) {
+    const tbody = document.getElementById("locationTable");
+    const visible = data.slice(0, 12);
+
+    if (!visible.length) {
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="5">
+                    Tidak ada destinasi yang sesuai dengan pencarian atau filter.
+                </td>
+            </tr>
+        `;
+
+        document.getElementById("tableCount").textContent = "0 data";
+        return;
+    }
+
+    tbody.innerHTML = visible.map(item => `
+        <tr>
+            <td>
+                <strong>${escapeHtml(item.nama_wisata)}</strong>
+                <span>
+                    ${escapeHtml(item.desa)}, ${escapeHtml(item.kecamatan)}
+                </span>
+            </td>
+
+            <td>
+                <span class="table-category">
+                    ${escapeHtml(normalizeCategory(item.kategori_wisata))}
+                </span>
+            </td>
+
+            <td>
+                ${escapeHtml(item.kecamatan)}
+            </td>
+
+            <td>
+                ${escapeHtml(item.jam_operasional)}
+            </td>
+
+            <td>
+                <button
+                    class="table-action"
+                    data-id="${escapeHtml(item.id)}"
+                    title="Lihat di peta"
+                >
+                    <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                </button>
+            </td>
+        </tr>
+    `).join("");
+
+    tbody.querySelectorAll(".table-action").forEach(button => {
+        button.addEventListener("click", () => {
+            const item = allData.find(
+                row => String(row.id) === String(button.dataset.id)
+            );
+
+            if (item) {
+                selectDestination(item);
+
+                map.flyTo(
+                    [item.latitude, item.longitude],
+                    15
+                );
+
+                document.getElementById("peta").scrollIntoView({
+                    behavior: "smooth"
+                });
+            }
+        });
+    });
+
+    document.getElementById("tableCount").textContent =
+        `${data.length} data`;
+}
+
+function renderMarkers(data, fitToResults = false) {
+    markers.forEach(marker => map.removeLayer(marker));
+    markers = [];
+
+    const bounds = [];
+
+    data.forEach(item => {
+        const marker = L.circleMarker(
+            [item.latitude, item.longitude],
+            {
+                radius: 8,
+                color: "#ffffff",
+                weight: 2,
+                fillColor: markerColor(item.kategori_wisata),
+                fillOpacity: 0.95
+            }
+        );
+
+        marker.bindPopup(createPopup(item));
+
+        marker.on("click", () => {
+            selectDestination(item);
+        });
+
+        marker.addTo(map);
+        markers.push(marker);
+
+        bounds.push([item.latitude, item.longitude]);
+    });
+
+    document.getElementById("visibleCount").textContent =
+        `${data.length} lokasi`;
+
+    if (fitToResults && bounds.length) {
+        map.fitBounds(bounds, {
+            padding: [35, 35],
+            maxZoom: 14
+        });
+    }
+}
+
+function createPopup(item) {
+    const category = normalizeCategory(item.kategori_wisata);
+
+    return `
+        <div class="popup">
+            <h3>${escapeHtml(item.nama_wisata)}</h3>
+
+            <span class="pill">${escapeHtml(category)}</span>
+
             <p>
-                File script.js merupakan kode JavaScript yang mengatur
-                interaksi dan fungsi utama WebGIS Jelajah-In Progo.
-                Kode ini digunakan untuk memuat data wisata, menampilkan
-                peta, mengelola pencarian, menyaring kategori, serta
-                menampilkan informasi destinasi wisata.
+                <strong>Lokasi:</strong>
+                ${escapeHtml(item.desa)}, ${escapeHtml(item.kecamatan)}
             </p>
-        </section>
 
-        <section>
-            <h2>2. Inisialisasi Program</h2>
-            <p class="file">Fungsi: initMap() dan DOMContentLoaded</p>
             <p>
-                Program dijalankan setelah struktur halaman HTML selesai
-                dimuat. Proses awal meliputi inisialisasi peta, pemuatan
-                data wisata, dan pengaturan event pada elemen halaman.
+                <strong>Jam:</strong>
+                ${escapeHtml(item.jam_operasional)}
             </p>
-            <p>
-                Fungsi <code>initMap()</code> membuat peta menggunakan
-                Leaflet, menentukan titik pusat awal di sekitar Kulon
-                Progo, dan menambahkan peta dasar OpenStreetMap.
-            </p>
-        </section>
 
-        <section>
-            <h2>3. Pemuatan dan Pengolahan Data</h2>
-            <p class="file">Fungsi: loadData() dan parseCSV()</p>
             <p>
-                Fungsi <code>loadData()</code> mengambil file CSV dari
-                repository GitHub. Setelah data berhasil dibaca,
-                program memanggil fungsi-fungsi untuk memperbarui
-                statistik, kategori, filter, tabel, dan marker peta.
+                <strong>Tiket:</strong>
+                ${escapeHtml(item.tiket_masuk)}
             </p>
-            <p>
-                Fungsi <code>parseCSV()</code> memisahkan isi CSV menjadi
-                baris dan kolom, menangani tanda kutip serta koma di
-                dalam teks, kemudian menyusun data menjadi objek
-                JavaScript berdasarkan nama kolom.
-            </p>
-            <p>
-                Jika data gagal dimuat, program menampilkan pesan
-                kesalahan pada tabel lokasi.
-            </p>
-        </section>
+        </div>
+    `;
+}
 
-        <section>
-            <h2>4. Pencarian dan Filter Kategori</h2>
-            <p class="file">
-                Fungsi: setupEvents(), renderFilters(), applyFilters()
-            </p>
-            <p>
-                Fitur pencarian digunakan untuk menemukan destinasi
-                berdasarkan nama wisata, kategori, kecamatan, desa,
-                alamat, dan deskripsi. Filter kategori digunakan untuk
-                menampilkan wisata berdasarkan kategori yang dipilih.
-            </p>
-            <p>
-                Hasil pencarian dan filter diperbarui pada marker peta
-                serta tabel daftar wisata. Tombol reset digunakan untuk
-                mengembalikan filter ke kondisi awal.
-            </p>
-        </section>
+function applyFilters() {
+    const keyword = document
+        .getElementById("searchInput")
+        .value
+        .trim()
+        .toLowerCase();
 
-        <section>
-            <h2>5. Visualisasi Peta dan Marker</h2>
-            <p class="file">
-                Fungsi: renderMarkers(), createPopup(), markerColor()
-            </p>
-            <p>
-                Fungsi <code>renderMarkers()</code> menampilkan lokasi
-                wisata berdasarkan koordinat lintang dan bujur.
-                Marker dibedakan berdasarkan kategori wisata dan
-                dilengkapi pop-up informasi.
-            </p>
-            <p>
-                Fungsi <code>createPopup()</code> menampilkan nama
-                destinasi, kategori, lokasi, jam operasional, dan
-                tiket masuk. Sementara itu, <code>markerColor()</code>
-                menentukan warna marker berdasarkan kategori.
-            </p>
-        </section>
+    const filtered = allData.filter(item => {
+        const category = normalizeCategory(item.kategori_wisata);
 
-        <section>
-            <h2>6. Tabel dan Informasi Destinasi</h2>
-            <p class="file">
-                Fungsi: renderTable(), selectDestination()
-            </p>
-            <p>
-                Fungsi <code>renderTable()</code> menampilkan maksimal
-                12 baris data pada tabel, termasuk nama wisata,
-                kategori, kecamatan, jam operasional, dan tombol untuk
-                melihat lokasi di peta.
-            </p>
-            <p>
-                Fungsi <code>selectDestination()</code> memperbarui
-                panel informasi destinasi, meliputi deskripsi, lokasi,
-                kategori, koordinat, fasilitas, serta tautan rute
-                menuju Google Maps.
-            </p>
-        </section>
+        const categoryMatch =
+            activeCategory === "Semua" ||
+            category === activeCategory;
 
-        <section>
-            <h2>7. Statistik dan Lokasi Pengguna</h2>
-            <p class="file">
-                Fungsi: updateStatistics(), getCategories()
-            </p>
-            <p>
-                Fungsi <code>updateStatistics()</code> menghitung
-                jumlah data wisata, kecamatan unik, dan kategori unik.
-                Fungsi <code>getCategories()</code> menyusun daftar
-                kategori yang tersedia dari data CSV.
-            </p>
-            <p>
-                Tombol lokasi pengguna memanfaatkan Geolocation API
-                pada browser untuk memusatkan peta ke posisi pengguna
-                apabila izin lokasi diberikan.
-            </p>
-        </section>
+        const searchText = [
+            item.nama_wisata,
+            item.kategori_wisata,
+            item.kecamatan,
+            item.desa,
+            item.alamat,
+            item.deskripsi
+        ]
+            .join(" ")
+            .toLowerCase();
 
-        <section>
-            <h2>8. Fungsi Pendukung</h2>
-            <p class="file">
-                Fungsi: renderCategoryOverview(),
-                renderSearchResults(), normalizeCategory(),
-                escapeHtml()
+        const searchMatch =
+            !keyword ||
+            searchText.includes(keyword);
+
+        return categoryMatch && searchMatch;
+    });
+
+    renderMarkers(filtered, false);
+    renderTable(filtered);
+
+    if (filtered.length) {
+        selectDestination(filtered[0]);
+    } else {
+        selectedData = null;
+
+        document.getElementById("selectedPlace").innerHTML = `
+            <div class="place-card">
+                <h3>Destinasi tidak ditemukan</h3>
+
+                <p class="place-description">
+                    Ubah kata kunci atau pilih kategori lain untuk melihat destinasi wisata.
+                </p>
+            </div>
+        `;
+    }
+
+    renderSearchResults(filtered, keyword);
+}
+
+function renderSearchResults(data, keyword) {
+    const box = document.getElementById("mapResults");
+
+    if (!keyword) {
+        box.classList.add("hidden");
+        box.innerHTML = "";
+        return;
+    }
+
+    if (!data.length) {
+        box.innerHTML = `
+            <div class="map-result">
+                <strong>Tidak ada hasil</strong>
+                <span>Coba kata kunci lain.</span>
+            </div>
+        `;
+
+        box.classList.remove("hidden");
+        return;
+    }
+
+    box.innerHTML = data.slice(0, 8).map(item => `
+        <div class="map-result" data-id="${escapeHtml(item.id)}">
+            <strong>${escapeHtml(item.nama_wisata)}</strong>
+
+            <span>
+                ${escapeHtml(item.kecamatan)}
+                ·
+                ${escapeHtml(normalizeCategory(item.kategori_wisata))}
+            </span>
+        </div>
+    `).join("");
+
+    box.classList.remove("hidden");
+
+    box.querySelectorAll(".map-result").forEach(element => {
+        element.addEventListener("click", () => {
+            const item = allData.find(
+                row => String(row.id) === String(element.dataset.id)
+            );
+
+            if (!item) {
+                return;
+            }
+
+            selectDestination(item);
+
+            map.flyTo(
+                [item.latitude, item.longitude],
+                15
+            );
+
+            const marker = markers.find(marker => {
+                const p = marker.getLatLng();
+
+                return p.lat === item.latitude &&
+                    p.lng === item.longitude;
+            });
+
+            if (marker) {
+                marker.openPopup();
+            }
+
+            box.classList.add("hidden");
+        });
+    });
+}
+
+function selectDestination(item) {
+    selectedData = item;
+
+    const category = normalizeCategory(item.kategori_wisata);
+
+    // Sidebar peta
+    document.getElementById("selectedPlace").innerHTML = `
+        <div class="place-card">
+            <h3>${escapeHtml(item.nama_wisata)}</h3>
+
+            <span class="place-category">
+                ${escapeHtml(category)}
+            </span>
+
+            <p class="place-description">
+                ${escapeHtml(item.deskripsi)}
             </p>
-            <p>
-                Fungsi-fungsi tersebut digunakan untuk menampilkan
-                ringkasan kategori, hasil pencarian, menyeragamkan
-                teks kategori untuk tampilan, dan mengamankan teks
-                yang dimasukkan ke dalam HTML agar karakter khusus
-                tidak ditafsirkan sebagai elemen HTML.
-            </p>
-        </section>
 
-        <section>
-            <h2>9. Teknologi yang Digunakan</h2>
-            <ul>
-                <li>JavaScript untuk logika dan interaksi WebGIS.</li>
-                <li>Leaflet untuk menampilkan peta interaktif.</li>
-                <li>OpenStreetMap sebagai peta dasar.</li>
-                <li>CSV yang diambil dari GitHub sebagai sumber data.</li>
-                <li>Geolocation API untuk mengakses lokasi pengguna.</li>
-                <li>Google Maps untuk menyediakan tautan rute.</li>
-            </ul>
-        </section>
+            <div class="place-info">
+                <div>
+                    <i class="fa-solid fa-location-dot"></i>
 
-        <a class="back" href="index.html">
-            ← Kembali ke dokumentasi utama
-        </a>
-    </main>
+                    <div>
+                        <span>Lokasi</span>
+                        <strong>
+                            ${escapeHtml(item.desa)}, ${escapeHtml(item.kecamatan)}
+                        </strong>
+                    </div>
+                </div>
 
-    <footer>
-        <p>Dokumentasi WebGIS Jelajah-In Progo</p>
-    </footer>
-</body>
-</html>
+                <div>
+                    <i class="fa-regular fa-clock"></i>
+
+                    <div>
+                        <span>Jam operasional</span>
+                        <strong>${escapeHtml(item.jam_operasional)}</strong>
+                    </div>
+                </div>
+
+                <div>
+                    <i class="fa-solid fa-ticket"></i>
+
+                    <div>
+                        <span>Tiket masuk</span>
+                        <strong>${escapeHtml(item.tiket_masuk)}</strong>
+                    </div>
+                </div>
+            </div>
+
+            <a
+                class="primary-button place-route"
+                href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${item.latitude},${item.longitude}`)}"
+                target="_blank"
+                rel="noopener"
+            >
+                <i class="fa-solid fa-route"></i>
+                Lihat Rute
+            </a>
+        </div>
+    `;
+
+    // Detail destinasi
+    document.getElementById("detailName").textContent =
+        item.nama_wisata;
+
+    document.getElementById("detailArea").textContent =
+        `${item.desa}, ${item.kecamatan}, ${item.kabupaten || "Kulon Progo"}`;
+
+    document.getElementById("detailCategory").textContent =
+        category;
+
+    document.getElementById("detailDescription").textContent =
+        item.deskripsi;
+
+    document.getElementById("detailHours").textContent =
+        item.jam_operasional;
+
+    document.getElementById("detailTicket").textContent =
+        item.tiket_masuk;
+
+    document.getElementById("detailCoordinates").textContent =
+        `${item.latitude}, ${item.longitude}`;
+
+    document.getElementById("detailSocial").textContent =
+        item.media_sosial || "-";
+
+    document.getElementById("detailToilet").textContent =
+        item.toilet || "-";
+
+    document.getElementById("detailMushola").textContent =
+        item.mushola || "-";
+
+    document.getElementById("detailFood").textContent =
+        item.tempat_makan || "-";
+
+    document.getElementById("routeButton").href =
+        `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${item.latitude},${item.longitude}`)}`;
+
+    document.getElementById("detailMapButton").onclick = (event) => {
+        event.preventDefault();
+
+        map.flyTo(
+            [item.latitude, item.longitude],
+            15
+        );
+
+        setTimeout(() => {
+            const marker = markers.find(m => {
+                const p = m.getLatLng();
+
+                return p.lat === item.latitude &&
+                    p.lng === item.longitude;
+            });
+
+            if (marker) {
+                marker.openPopup();
+            }
+        }, 400);
+    };
+}
+
+function normalizeCategory(value) {
+    // Hanya untuk tampilan/filter. CSV asli tidak diubah.
+    return String(value || "").trim();
+}
+
+function markerColor(category) {
+    const value = normalizeCategory(category);
+
+    if (value === "Wisata Alam") {
+        return "#3f765f";
+    }
+
+    if (value === "Wisata Rekreasi") {
+        return "#829553";
+    }
+
+    if (value === "Wisata Budaya dan Religi") {
+        return "#8b6d4f";
+    }
+
+    return "#6e8077";
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
